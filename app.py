@@ -3,7 +3,7 @@
 
 import os,re,sys,time,random,requests
 from datetime import datetime
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 
 # --- 环境变量 ---
 COOKIE_VALUE = os.environ.get('COOKIE_VALUE') or ""    # remember_web cookie 值，必填
@@ -238,8 +238,22 @@ def renew_service(page):
         handle_cloudflare(page)
 
         log("🖱️ 准备点击 'Renew' 按钮...")
-        renew_btn = page.locator('button:has-text("Renew")')
-        create_btn = page.locator('button:has-text("Create Invoice")')
+        # 录制确认：Renew 是 Flowbite 弹窗按钮 data-modal-target="renewService-<id>"，
+        # Create Invoice 是表单 #renew-form-<id> 的 submit，POST /service/<id>/renew 后 302 到 /payment/invoice/<uuid>
+        sid_match = re.search(r'/service/(\d+)/', SERVICE_URL or '')
+        sid = sid_match.group(1) if sid_match else None
+        if sid:
+            renew_btn = page.locator(f'button[data-modal-target="renewService-{sid}"]').first
+            if renew_btn.count() == 0:
+                renew_btn = page.locator('button:has-text("Renew")').first
+            create_btn = page.locator(f'#renew-form-{sid} button[type="submit"]').first
+            if create_btn.count() == 0:
+                create_btn = page.locator('button:has-text("Create Invoice")').first
+            modal_box = page.locator(f'#renewService-{sid}').first
+        else:
+            renew_btn = page.locator('button:has-text("Renew")').first
+            create_btn = page.locator('button:has-text("Create Invoice")').first
+            modal_box = None
 
         modal_opened = False
         for i in range(3):
@@ -260,10 +274,24 @@ def renew_service(page):
                 log("🖲️ 等待弹窗出现...")
                 try:
                     create_btn.wait_for(state="visible", timeout=5000)
+                    if modal_box is not None and modal_box.count() > 0:
+                        try:
+                            cls = modal_box.get_attribute("class") or ""
+                            if "hidden" in cls.split():
+                                log("⚠️ modal 仍带 hidden 类，视为未真正打开，继续重试...")
+                                time.sleep(2)
+                                continue
+                        except Exception:
+                            pass
+                    create_btn.scroll_into_view_if_needed()
+                    time.sleep(0.5)  # 等 Flowbite 弹窗动画完成，避免点到隐藏按钮
                     modal_opened = True
                     log("✅ 弹窗已成功弹出！")
                     break
-                except:
+                except PlaywrightTimeoutError:
+                    log("⚠️ 弹窗未出现，可能是点击未响应，准备重试...")
+                    time.sleep(2)
+                except Exception:
                     log("⚠️ 弹窗未出现，可能是点击未响应，准备重试...")
                     time.sleep(2)
             except Exception as e:
@@ -276,23 +304,72 @@ def renew_service(page):
 
         handle_cloudflare(page)
         log("🖱️ 点击 'Create Invoice'...")
-        create_btn.click()
+        try:
+            with page.expect_navigation(wait_until="domcontentloaded", timeout=15000):
+                create_btn.click()
+            log("➡ Create Invoice 已触发导航，当前URL: " + page.url)
+        except Exception as e:
+            log(f"⚠️ 点击后15s内未捕获到导航 ({e})，转入90s轮询，当前URL: {page.url}")
 
         new_invoice_url = None
         start_wait = time.time()
+        last_diag = 0
+        relogin_tried = False
         while time.time() - start_wait < 90:
-            if "/payment/invoice/" in page.url:
-                new_invoice_url = page.url
+            cur_url = page.url
+            if "/payment/invoice/" in cur_url:
+                new_invoice_url = cur_url
                 log(f"🎉 页面已跳转: {new_invoice_url}")
                 break
+            # 录制曾出现：Create Invoice POST 后被 302 到 /auth/login（session 在续期那一刻过期）
+            if "/auth/login" in cur_url and not relogin_tried:
+                relogin_tried = True
+                log("⚠️ 跳到登录页，session可能在续期POST时失效，尝试重登录后重试一次...")
+                try:
+                    if login(page):
+                        page.goto(SERVICE_URL, wait_until="domcontentloaded", timeout=60000)
+                        handle_cloudflare(page)
+                        try:
+                            renew_btn.click()
+                            time.sleep(2)
+                            create_btn.wait_for(state="visible", timeout=5000)
+                            create_btn.scroll_into_view_if_needed()
+                            time.sleep(0.5)
+                            try:
+                                with page.expect_navigation(wait_until="domcontentloaded", timeout=15000):
+                                    create_btn.click()
+                            except Exception:
+                                try:
+                                    create_btn.click()
+                                except Exception as e2:
+                                    log(f"❌ 重试点击失败: {e2}")
+                        except Exception as e2:
+                            log(f"❌ 重登后重试流程失败: {e2}")
+                    else:
+                        log("❌ 重登录失败，不再重试登录。")
+                except Exception as e2:
+                    log(f"❌ 重登录异常: {e2}")
             if page.locator('iframe[src*="challenges.cloudflare.com"]').count() > 0:
                 log("⚠️ 遇到拦截，尝试处理...")
                 handle_cloudflare(page)
+            if time.time() - last_diag >= 5:
+                last_diag = time.time()
+                try:
+                    snippet = page.locator("body").inner_text()[:300].replace("\n", " | ")
+                except Exception:
+                    snippet = "<body不可读>"
+                log(f"⏳ 等发票页...({int(time.time() - start_wait)}s) url={cur_url} snippet={snippet}")
             time.sleep(1)
 
         if not new_invoice_url:
-            log("❌ 未能进入发票页面，超时。")
+            log(f"❌ 未能进入发票页面，超时。最后URL: {page.url}")
             page.screenshot(path="renew_stuck_invoice.png")
+            try:
+                with open("renew_stuck_invoice.html", "w", encoding="utf-8") as f:
+                    f.write(page.content())
+                log("🧾 已保存 renew_stuck_invoice.html 供排查")
+            except Exception as e:
+                log(f"⚠️ 保存HTML失败: {e}")
             return False
 
         if page.url != new_invoice_url:
