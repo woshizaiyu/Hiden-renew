@@ -361,6 +361,17 @@ def solve_modal_turnstile(page, timeout=90):
     log("❌ Turnstile 验证超时。")
     return False
 
+def _poll_turnstile_token(page, timeout=15):
+    """轮询 Turnstile 真实 token；拿到返回 token，否则返回 None（复选框消失不等于 token 已生成）"""
+    start = time.time()
+    while time.time() - start < timeout:
+        token = _get_turnstile_token(page)
+        if token:
+            log("✅ 已拿到 Turnstile 真实 token！")
+            return token
+        time.sleep(1)
+    return None
+
 def open_browser(p):
     """启动浏览器，返回 (browser, page)。优先 patchright（反检测内核），未安装则退回原生 playwright。"""
     proxy_arg = {"server": PROXY_SERVER} if IS_PROXY else None
@@ -604,23 +615,57 @@ def renew_service(page):
             page.screenshot(path="renew_modal_failed.png")
             return False
 
-        # 弹窗内先完成 Turnstile 人机验证，再提交
-        handle_cloudflare(page, timeout=60)
-        if not solve_modal_turnstile(page, timeout=90):
-            log("⚠️ Turnstile 未确认通过，仍将尝试提交...")
-            page.screenshot(path="turnstile_timeout.png")
-
-        # 点击 Create Invoice；未跳转说明验证未通过/已过期，重做验证后再试
+        # 点击 Create Invoice；上一轮提交后弹窗可能已关闭（按钮变 hidden），
+        # 且无真实 token 提交会被服务端拒绝——每轮先确保弹窗开着、token 真实存在，再提交
         new_invoice_url = None
         for attempt in range(6):
-            log(f"🖱️ 点击 'Create Invoice'（第 {attempt + 1} 次）...")
+            log(f"—— 第 {attempt + 1}/6 轮提交 ——")
+            # 1) 确保弹窗开着
             try:
-                create_btn.wait_for(state="visible", timeout=20000)
-                create_btn.click(timeout=20000)
+                create_btn.wait_for(state="visible", timeout=8000)
+            except Exception:
+                log("⚠️ 弹窗不在前台（Create Invoice 不可见），重新点击 Renew 打开...")
+                try:
+                    renew_btn.wait_for(state="visible", timeout=10000)
+                    renew_btn.scroll_into_view_if_needed()
+                    renew_btn.click()
+                    time.sleep(3)
+                    page_text = page.locator("body").inner_text()
+                    if "Renewal Restricted" in page_text or "can only renew" in page_text.lower():
+                        log("⚠️ 未到续期时间，无法续期。")
+                        page.screenshot(path="renew_not_allowed.png")
+                        return "NOT_TIME"
+                    create_btn.wait_for(state="visible", timeout=8000)
+                    log("✅ 弹窗已重新打开！")
+                except Exception as e:
+                    log(f"⚠️ 重开弹窗失败: {e}，下一轮重试...")
+                    time.sleep(2)
+                    continue
+
+            # 2) 先过验证，再确认拿到真实 token（复选框消失不等于 token 已生成）
+            handle_cloudflare(page, timeout=60)
+            if not solve_modal_turnstile(page, timeout=90):
+                log("⚠️ Turnstile 未确认通过，仍将尝试探明提交状态...")
+                page.screenshot(path="turnstile_timeout.png")
+            if not _poll_turnstile_token(page, timeout=15):
+                log("⚠️ 未拿到 Turnstile 真实 token，本次提交可能被服务端拒绝（419/422），仍提交以探明状态码...")
+
+            # 3) 点击提交，同时监听续期接口响应（盲等改明等）
+            log("🖱️ 点击 'Create Invoice'...")
+            try:
+                with page.expect_response(
+                    lambda r: "/renew" in r.url and r.request.method == "POST",
+                    timeout=30000,
+                ) as resp_info:
+                    create_btn.wait_for(state="visible", timeout=20000)
+                    create_btn.click(timeout=20000)
+                try:
+                    resp = resp_info.value
+                    log(f"📡 续期接口响应: {resp.status} {resp.url}")
+                except Exception:
+                    pass
             except Exception as e:
-                log(f"⚠️ 点击 Create Invoice 失败: {e}")
-                solve_modal_turnstile(page, timeout=45)
-                continue
+                log(f"⚠️ 30s 内未捕获到续期接口 POST（可能 JS 校验未通过或 token 失效）: {e}")
 
             start_wait = time.time()
             while time.time() - start_wait < 30:
@@ -636,8 +681,12 @@ def renew_service(page):
             if new_invoice_url:
                 break
 
-            log("⚠️ 未跳转到发票页面，尝试重新完成 Turnstile 验证后重试...")
-            solve_modal_turnstile(page, timeout=45)
+            try:
+                snippet = page.locator("body").inner_text()[:500].replace("\n", " | ")
+            except Exception:
+                snippet = "<body不可读>"
+            log(f"⚠️ 未跳转到发票页面（url={page.url}），页面提示: {snippet}")
+            log("🔁 下一轮将重开弹窗 → 重做验证 → 重试提交...")
 
         if not new_invoice_url:
             log("❌ 未能进入发票页面，超时。")
