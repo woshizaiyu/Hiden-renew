@@ -1,0 +1,13 @@
+__pycache__/
+.tmp/
+agentscribe-*
+storage-state*.json
+slim-storage-state.json
+screenshots/
+*.log
+*.png
+renew_stuck_invoice.html
+sing-box
+sing-box-config.json
+sing-box.log
+workflow_repo/

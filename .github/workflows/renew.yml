@@ -3,7 +3,7 @@ name: Auto Renew HidenCloud
 on:
   workflow_dispatch:
   schedule:
-    - cron: '17 3 8 10 *'   # 自动更新下次运行时间
+    - cron: '22 3 1 10 *'   # 自动更新下次运行时间
 
 permissions:
   actions: write
@@ -11,8 +11,8 @@ permissions:
 
 jobs:
   Renew-HidenCloud:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
 
     steps:
       - name: Checkout repository
@@ -21,16 +21,17 @@ jobs:
       - name: ⚙ 设置 Python
         uses: actions/setup-python@v6
         with:
-          python-version: '3.11'
+          python-version: '3.13'
 
       - name: 🛠️ 安装系统依赖和 Python 依赖
         run: |
           sudo apt-get update
           sudo apt-get install -y xvfb
-          pip install playwright requests 'requests[socks]'
-          python -m playwright install --with-deps chrome
-          
+          pip install patchright requests 'requests[socks]'
+          python -m patchright install --with-deps chrome
+
       - name: ⚙ 设置代理 (sing-box)
+        continue-on-error: true
         env:
           NODE_LINK: ${{ secrets.NODE_LINK }}
         run: |
@@ -57,6 +58,22 @@ jobs:
           pkill -f chrome || true
           pkill -f Xvfb || true
           rm -f sing-box sing-box-config.json sing-box.log
+
+      # 更新时间到time.txt,避免6个月未更新导致工作流暂停
+      - name: 🕒 更新时间
+        if: always()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git pull --rebase || true
+          echo "$(TZ=Asia/Shanghai date +'%Y-%m-%d %H:%M:%S')" > time.txt
+          git add time.txt
+          if git diff --cached --quiet; then
+            echo "No need to commit"
+          else
+            git commit -m "⏱️ Auto Update by Github Actions $(TZ=Asia/Shanghai date +'%Y-%m-%d %H:%M:%S')"
+            git push || git push --force-with-lease || true
+          fi
 
       - name: 🧹 清理旧的工作流运行记录
         if: always()
