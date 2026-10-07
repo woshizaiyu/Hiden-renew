@@ -361,6 +361,34 @@ def solve_modal_turnstile(page, timeout=90):
     log("❌ Turnstile 验证超时。")
     return False
 
+def _dismiss_cookie_banner(page):
+    """关闭 NCMP cookie 同意横幅（#ncmp__tool），它会盖住续期弹窗按钮拦截点击"""
+    try:
+        tool = page.locator('#ncmp__tool')
+        if tool.count() == 0:
+            return True
+        for text in ('Accept all', 'Accept', '同意', '接受', 'OK', 'Got it', 'Allow'):
+            try:
+                btn = tool.locator(f'button:has-text("{text}")').first
+                if btn.count() > 0 and btn.is_visible():
+                    btn.click(timeout=3000)
+                    log(f"🍪 已点击 cookie 横幅按钮（{text}）")
+                    break
+            except Exception:
+                continue
+        time.sleep(1)
+        try:
+            if tool.count() == 0 or not tool.first.is_visible():
+                log("🍪 cookie 横幅已关闭")
+                return True
+        except Exception:
+            return True
+        log("⚠️ cookie 横幅仍在，将用强制点击绕过")
+        return False
+    except Exception as e:
+        log(f"⚠️ 关闭 cookie 横幅异常（忽略）: {e}")
+        return False
+
 def open_browser(p):
     """启动浏览器，返回 (browser, page)。优先 patchright（反检测内核），未安装则退回原生 playwright。"""
     proxy_arg = {"server": PROXY_SERVER} if IS_PROXY else None
@@ -616,7 +644,26 @@ def renew_service(page):
             log(f"🖱️ 点击 'Create Invoice'（第 {attempt + 1} 次）...")
             try:
                 create_btn.wait_for(state="visible", timeout=20000)
-                create_btn.click(timeout=20000)
+                _dismiss_cookie_banner(page)
+                try:
+                    create_btn.click(timeout=20000)
+                except Exception as e:
+                    if "intercepts pointer events" not in str(e):
+                        raise
+                    log("⚠️ 普通点击被浮层拦截，改用强制点击...")
+                    try:
+                        create_btn.click(timeout=5000, force=True)
+                    except Exception as e2:
+                        log(f"⚠️ 强制点击也失败 ({e2})，改用 JS 直接提交表单...")
+                        handle = create_btn.element_handle(timeout=5000)
+                        if not handle:
+                            raise Exception("拿不到按钮句柄")
+                        page.evaluate(
+                            "(btn) => { const f = btn.closest('form');"
+                            " if (f) { if (f.requestSubmit) f.requestSubmit(); else f.submit(); }"
+                            " else btn.click(); }",
+                            handle,
+                        )
             except Exception as e:
                 log(f"⚠️ 点击 Create Invoice 失败: {e}")
                 solve_modal_turnstile(page, timeout=45)
