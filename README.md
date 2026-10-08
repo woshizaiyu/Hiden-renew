@@ -1,6 +1,9 @@
 ## HidenCloud自动续期
 使用Github Actions 自动给HidenCloud服务续期,HidenCloud容易封多账号，隔离好环境,使用独享节点(仅自己一人使用的)
 
+
+温馨提示： HidenCloud已取消Remenber_web长效cookie，需要使用账号密码登录，需要过cloudflare验证，尽量使用干净点的节点，否则无法过验证。
+
 ## 配置
 
 在仓库 `Settings → Secrets and variables → Actions` 中添加以下 Secrets：
@@ -13,7 +16,6 @@
 | `NODE_LINK`     | ❌可选 | 代理节点地址,例如:vless:// vmess:// trojan:// hysteria2:// anytls://|
 | `TG_BOT_TOKEN`  | ❌可选 | Telegram Bot Token | 
 | `TG_CHAT_ID`    | ❌可选 | Telegram Chat ID |
-| `REPO_TOKEN`    | ❌可选 | GitHub Personal Access Token,用于自动更新 Cron 运行时间,需 `repo` 权限 |
 
 
 `COOKIE_VALUE`的获取如图(登录dashborad后F12或右键检查,选择 应用程序 或 Appcations 或 存储,左边找到cookie获取)
@@ -39,9 +41,7 @@
 1. Fork 本仓库  
 2. 在仓库 Secrets 中配置必填的环境变量,（可选）配置 `TG_BOT_TOKEN`、`TG_CHAT_ID`、`NODE_LINK`  
 3. Actions菜单里手动触发 `workflow_dispatch`  
-4. 配置 `REPO_TOKEN` 后,每次运行结束会自动根据续期后的到期时间计算并更新 cron 运行时间（到期前约 20 小时再次运行）；未配置则需手动修改,比如你的服务是25号到期,计算后是星期二,则设置cron为每周一运行
-
-`REPO_TOKEN` 获取方式：GitHub → Settings → Developer settings → Personal access tokens → Tokens (classic) → Generate new token,勾选 `repo` 权限,生成后添加到仓库 Actions Secrets 中。不配置则跳过自动更新 Cron 步骤。
+4. 根据服务到期时间来修改cron运行时间,比如你的服务是25号到期,计算后是星期二,则设置cron为每周一运行
 
 
 ---
